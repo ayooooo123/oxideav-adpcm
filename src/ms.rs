@@ -179,13 +179,14 @@ fn decode_nibble(st: &mut ChannelState, nibble: u8) -> i16 {
     // Sign-extend 4-bit → i32 via (n ^ 8) - 8.
     let signed = ((nibble as i32) ^ 8) - 8;
 
-    // Linear predictor (scaled by 256). The coefficient products stay
-    // inside i64 to keep arbitrary `sample1`/`sample2` from overflowing
-    // i32 — both are constrained to i16 by the time they re-enter as
-    // history but the *first* call reads sample1/sample2 from the block
-    // header, which can be any 16-bit value.
-    let predicted =
-        (st.sample1 as i64 * st.coef1 as i64 + st.sample2 as i64 * st.coef2 as i64) >> 8;
+    // Linear predictor: `/ 256`, truncating toward zero as Microsoft's
+    // formula and FFmpeg do (an arithmetic `>> 8` floors negative sums, so
+    // every predictor set but 0, 1 and 2 drifts from them). The coefficient
+    // products stay inside i64 to keep arbitrary `sample1`/`sample2` from
+    // overflowing i32 — both are constrained to i16 by the time they
+    // re-enter as history but the *first* call reads sample1/sample2 from
+    // the block header, which can be any 16-bit value.
+    let predicted = (st.sample1 as i64 * st.coef1 as i64 + st.sample2 as i64 * st.coef2 as i64) / 256;
 
     // Add error term (saturating; `delta` is a header-supplied i32 that
     // can be arbitrary on malformed input).
@@ -203,10 +204,9 @@ fn decode_nibble(st: &mut ChannelState, nibble: u8) -> i16 {
     if d < 16 {
         d = 16;
     }
-    // Cap at i32::MAX so the next iteration's `signed * delta` still
-    // fits in i64 trivially; in well-formed streams `delta` never grows
-    // anywhere near this cap.
-    st.delta = d.min(i32::MAX as i64) as i32;
+    // Capped at FFmpeg's `INT_MAX / 768` (a loud block's step can grow
+    // past it; the cap decides how fast it shrinks again).
+    st.delta = d.min(i64::from(i32::MAX / 768)) as i32;
 
     out
 }

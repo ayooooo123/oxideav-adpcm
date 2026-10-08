@@ -11,12 +11,13 @@
 //!
 //! These tests are self-contained: no fixtures, no external binaries.
 //! The "OKI body" is synthesised with the crate's own typed Dialogic
-//! encoder and the registry decode is checked against the typed Dialogic
-//! decode of the same bytes.
+//! encoder and the registry decode is checked against the VOX-layout
+//! decode of the same bytes (high nibble first, FFmpeg's `adpcm_ima_oki`
+//! arithmetic, which the registry decoder uses).
 
 use oxideav_adpcm::{
-    dialogic::{self, Channel, NibbleOrder, Output},
-    register_codecs, CODEC_ID_DIALOGIC,
+    dialogic::{self, Channel, NibbleOrder},
+    ffmpeg_adpcm, register_codecs, CODEC_ID_DIALOGIC,
 };
 use oxideav_core::{
     CodecId, CodecParameters, CodecRegistry, CodecTag, Frame, Packet, ProbeContext, TimeBase,
@@ -57,11 +58,10 @@ fn oki_wav_body_decodes_identically_to_typed_vox_path() {
     let pcm = synth_pcm(512);
     let body = encode_oki_body(&pcm);
 
-    // Reference: the typed Dialogic decode of the same body, the path a
+    // Reference: the VOX-layout decode of the same body, the path a
     // `.vox` reader uses (HiFirst nibble order, 16-bit widened output).
     let mut ref_state = [Channel::default()];
-    let reference =
-        dialogic::decode_packet(&body, &mut ref_state, NibbleOrder::HiFirst, Output::Wide16);
+    let reference = ffmpeg_adpcm::decode_oki_packet(&body, &mut ref_state, NibbleOrder::HiFirst);
 
     // Registry path: build the decoder the way a WAV demuxer would after
     // reading wFormatTag = 0x0010, then drive the body through it.

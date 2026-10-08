@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### PearTube fork
+
+- Every variant FFmpeg also decodes now decodes as FFmpeg 2da55bf does,
+  sample for sample (QuickTime IMA mono and stereo in MOV/AIFF/CAF, IMA
+  WAV and MS ADPCM in WAV/AVI/MOV, Yamaha, OKI, G.726 at 16/24/32/40 kbit/s,
+  Creative and Sound Blaster Pro ADPCM). Two files are LGPL-2.1-or-later
+  ports of FFmpeg's `adpcm.c` and `g726.c` (`src/ffmpeg_adpcm.rs`,
+  `src/ffmpeg_g726.rs`); the crate is now `MIT AND LGPL-2.1-or-later`.
+- `adpcm_ima_qt`: the predictor and step index carry from block to block as
+  FFmpeg's (a block header only replaces them when they differ enough);
+  IMA4 in `.mov` went from 39.8 dB to equal.
+- `adpcm_ms`: the predictor divides by 256 toward zero (Microsoft's formula,
+  FFmpeg's), not `>> 8`, which floored negative sums for predictor sets
+  3-6; the step is capped at `INT_MAX / 768` as FFmpeg's. The encoder's
+  simulation of the decoder follows.
+- QuickTime `ms\0\x02` and `ms\0\x11` resolve to `adpcm_ms` and
+  `adpcm_ima_wav` (FFmpeg's `ff_codec_movaudio_tags`); a FourCC-tagged MS
+  entry keeps the standard coefficients.
+- `adpcm_dialogic`: the registry decoder rounds as FFmpeg's `adpcm_ima_oki`.
+- `adpcm_g726`: the rate also comes from the container's
+  `bits_per_coded_sample`; the registry decoder's linear output is FFmpeg's
+  decoder.
+- New decoders: `adpcm_ct` (WAV tag 0x0200) and `adpcm_sbpro_2`/`_3`/`_4`
+  (VOC files).
+- Both decoders report their output (`output_audio_format`: interleaved
+  S16), so a container's declared sample format no longer misleads.
+  `oxideav-core` is patched to the PearTube fork for it.
+
 ## [0.0.7](https://github.com/OxideAV/oxideav-adpcm/compare/v0.0.6...v0.0.7) - 2026-08-20
 
 ### Other

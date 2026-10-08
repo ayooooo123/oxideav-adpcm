@@ -32,7 +32,7 @@
 //! glue path is on the no-panic contract as well.
 
 use oxideav_adpcm::{
-    decoder, dialogic, g726, ima_qt, ima_wav, ms, register_codecs, yamaha, yamaha_a,
+    decoder, dialogic, ffmpeg_g726, g726, ima_qt, ima_wav, ms, register_codecs, yamaha, yamaha_a,
     CODEC_ID_DIALOGIC, CODEC_ID_G726, CODEC_ID_IMA_QT, CODEC_ID_IMA_WAV, CODEC_ID_MS,
     CODEC_ID_YAMAHA, CODEC_ID_YAMAHA_A,
 };
@@ -799,7 +799,8 @@ fn g726_truncated_prefixes_never_panic() {
 /// The registry-trait path shares the no-panic contract: pseudo-random
 /// packets of pseudo-random sizes stream through `send_packet` /
 /// `receive_frame` at every rate without error (G.726 rejects no byte
-/// pattern) and the total PCM matches the one-shot decode bit-for-bit.
+/// pattern) and the total PCM matches the whole buffer's codes decoded
+/// one after another (the registry's linear output is FFmpeg's decoder).
 #[test]
 fn g726_registry_path_random_packets_match_one_shot_decode() {
     let mut lcg = Lcg::new(0xD726_0003);
@@ -808,12 +809,13 @@ fn g726_registry_path_random_packets_match_one_shot_decode() {
     for bits in ["2", "3", "4", "5"] {
         let mut payload = vec![0u8; 1024];
         lcg.fill(&mut payload);
-        // One-shot reference through the direct API.
+        // Whole-buffer reference: every code, in order.
         let rate = g726::Rate::from_bits(bits.parse().unwrap()).unwrap();
-        let mut st = g726::State::new(rate);
         let mut un = g726::BitUnpacker::new(g726::BitOrder::MsbFirst);
-        let mut reference = Vec::new();
-        g726::decode_packet(&payload, &mut st, &mut un, &mut reference);
+        let mut codes = Vec::new();
+        un.feed(&payload, rate.bits(), &mut codes);
+        let mut d = ffmpeg_g726::Decoder::new(rate);
+        let reference: Vec<i16> = codes.iter().map(|&c| d.decode(c)).collect();
         // Registry path with random packet sizes.
         let mut params = CodecParameters::audio(CodecId::new(CODEC_ID_G726));
         params.sample_rate = Some(8_000);
@@ -866,12 +868,12 @@ fn g726_wav_framing_registry_random_packets_match_reference() {
                 let mut codes = Vec::new();
                 un.feed(&stripped, rate.bits(), &mut codes);
                 codes.truncate(codes.len() - codes.len() % channels as usize);
-                let mut lanes: Vec<g726::State> =
-                    (0..channels).map(|_| g726::State::new(rate)).collect();
+                let mut lanes: Vec<ffmpeg_g726::Decoder> =
+                    (0..channels).map(|_| ffmpeg_g726::Decoder::new(rate)).collect();
                 let reference: Vec<i16> = codes
                     .iter()
                     .enumerate()
-                    .map(|(n, &c)| lanes[n % channels as usize].decode_i16(c))
+                    .map(|(n, &c)| lanes[n % channels as usize].decode(c))
                     .collect();
 
                 // Registry path with random packet chops.

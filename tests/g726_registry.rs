@@ -95,6 +95,12 @@ fn round_trip(
     (bytes, out)
 }
 
+/// The registry encoder at every rate and bit order: the packed length,
+/// and the quality of its code stream as its ITU partner decoder
+/// (`g726::State`) reads it. The registry decoder is FFmpeg's, which does
+/// not pair with an ITU encoder at every rate (a 40 kbit/s tone reads back
+/// at 7.8 dB in it, as in FFmpeg 2da55bf itself), so it is not the
+/// measure here.
 #[test]
 fn registry_round_trip_all_rates_both_orders() {
     let pcm = sine_pcm(4000, 700.0, 9000.0);
@@ -111,7 +117,13 @@ fn registry_round_trip_all_rates_both_orders() {
             );
             // Flush padding may append trailing zero codes.
             assert!(decoded.len() >= pcm.len(), "bits={bits} order={order}");
-            let snr = snr_db(&pcm[500..], &decoded[500..pcm.len()]);
+            let rate = g726::Rate::from_bits(bits_n as u8).unwrap();
+            let bit_order = if order == "msb" { g726::BitOrder::MsbFirst } else { g726::BitOrder::LsbFirst };
+            let mut codes = Vec::new();
+            g726::BitUnpacker::new(bit_order).feed(&bytes, rate.bits(), &mut codes);
+            let mut itu = g726::State::new(rate);
+            let itu_pcm: Vec<i16> = codes.iter().map(|&c| itu.decode_i16(c)).collect();
+            let snr = snr_db(&pcm[500..], &itu_pcm[500..pcm.len()]);
             let floor = match bits_n {
                 2 => 4.0,
                 3 => 11.0,

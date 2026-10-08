@@ -135,7 +135,8 @@ fn ms_simulate_nibble(st: &MsState, nibble: u8) -> i16 {
     let signed = ((nibble as i64) ^ 8) - 8;
     let term1 = (st.sample1 as i64).saturating_mul(st.coef1 as i64);
     let term2 = (st.sample2 as i64).saturating_mul(st.coef2 as i64);
-    let predicted = term1.saturating_add(term2) >> 8;
+    // `/ 256` truncates toward zero, as the decoder (`ms::decode_nibble`).
+    let predicted = term1.saturating_add(term2) / 256;
     let delta = signed.saturating_mul(st.delta as i64);
     clamp_i16(predicted.saturating_add(delta))
 }
@@ -159,7 +160,8 @@ fn ms_advance(st: &mut MsState, nibble: u8, out: i16) {
     if d < 16 {
         d = 16;
     }
-    st.delta = d;
+    // The decoder's cap (FFmpeg's `INT_MAX / 768`).
+    st.delta = d.min(i32::MAX / 768);
 }
 
 /// Pick the 4-bit nibble that minimises |decoded - target|, breaking

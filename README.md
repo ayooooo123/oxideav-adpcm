@@ -519,4 +519,9 @@ constants (uncopyrightable facts).
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE) — except two files ported from FFmpeg 2da55bf
+so the decoders give FFmpeg's output, which are LGPL-2.1-or-later (see
+[LICENSE-LGPL](LICENSE-LGPL)): `src/ffmpeg_adpcm.rs` (QuickTime IMA's
+state from block to block, OKI's rounding, the Creative and Sound Blaster
+Pro decoders) and `src/ffmpeg_g726.rs` (the G.726 decoder's linear
+output). The crate as a whole is `MIT AND LGPL-2.1-or-later`.

@@ -5,9 +5,9 @@
 //! packet immediately and stores the decoded PCM in `pending`, then
 //! `receive_frame` emits exactly one `AudioFrame` and drops the buffer.
 
-use crate::{dialogic, g726, ima_qt, ima_wav, ms, yamaha, yamaha_a};
+use crate::{dialogic, ffmpeg_adpcm, ffmpeg_g726, g726, ima_qt, ima_wav, ms, yamaha, yamaha_a};
 use oxideav_core::Decoder;
-use oxideav_core::{AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, Result};
+use oxideav_core::{AudioFormat, AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, Result, SampleFormat};
 
 /// Which of the supported variants this instance implements.
 ///
@@ -991,6 +991,16 @@ pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>>
     // and reject overrides.
     let mut ima_bits: u8 = 4;
     let mut g726_rate = g726::Rate::R32;
+    // The container's bits per coded sample (FFmpeg's `bits_per_coded_sample`,
+    // WAV `wBitsPerSample`): G.726's code width and IMA-WAV's bit depth,
+    // where they make sense; the `bits_per_sample` option below wins.
+    if let Some(bits) = params.options.get("bits_per_coded_sample").and_then(|v| v.parse::<u8>().ok()) {
+        match (variant, bits) {
+            (Variant::G726, 2..=5) => g726_rate = g726::Rate::from_bits(bits).expect("2..=5 maps to a rate"),
+            (Variant::ImaWav, 3 | 4) => ima_bits = bits,
+            _ => {}
+        }
+    }
     if let Some(v) = params.options.get("bits_per_sample") {
         let bits: u8 = v.parse().map_err(|_| {
             Error::invalid(format!(
@@ -1024,10 +1034,13 @@ pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>>
     // WAVEFORMATEX trailer (`wNumCoef` / `aCoeff[]`); a per-block predictor
     // index can then point at a custom set (>= 7). Resolve the table once
     // from `extradata`; an empty trailer keeps the 7 standard presets.
-    let ms_coeffs = if variant == Variant::Ms {
-        ms::parse_extradata_coeffs(&params.extradata)?
-    } else {
-        None
+    // QuickTime's `ms\0\x02` entries (a FourCC tag) carry their own atoms
+    // as extradata, not that trailer: they keep the presets, which are all
+    // FFmpeg ever uses.
+    let ms_coeffs = match (variant, &params.tag) {
+        (Variant::Ms, Some(oxideav_core::CodecTag::Fourcc(_))) => None,
+        (Variant::Ms, _) => ms::parse_extradata_coeffs(&params.extradata)?,
+        _ => None,
     };
     // OKI-in-WAV `fmt ` extension (`OKIADPCMWAVEFORMAT`): a single
     // `wPole` word ("high frequency emphasis value", cbSize = 2). The
@@ -1183,6 +1196,7 @@ pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>>
         codec_id: params.codec_id.clone(),
         variant,
         channels,
+        sample_rate: params.sample_rate,
         ima_bits,
         ms_coeffs,
         block_align,
@@ -1192,8 +1206,10 @@ pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>>
         yamaha_state: vec![yamaha::Channel::for_chip(yamaha_chip); channels as usize],
         yamaha_a_state: vec![yamaha_a::Channel::default(); channels as usize],
         dialogic_state: vec![dialogic::Channel::default(); channels as usize],
+        qt_state: vec![ffmpeg_adpcm::QtChannel::default(); channels as usize],
         g726_rate,
         g726_states: vec![g726::State::new(g726_rate); g726_lanes],
+        g726_ffmpeg: (0..g726_lanes).map(|_| ffmpeg_g726::Decoder::new(g726_rate)).collect(),
         g726_unpacker: g726::BitUnpacker::new(g726_order),
         g726_order,
         g726_law,
@@ -1215,6 +1231,8 @@ pub struct AdpcmDecoder {
     codec_id: CodecId,
     variant: Variant,
     channels: u16,
+    // The stream's rate, for `output_audio_format`.
+    sample_rate: Option<u32>,
     // IMA-WAV code width: 4 (default) or 3, from the `bits_per_sample`
     // codec option. Unused by the other variants.
     ima_bits: u8,
@@ -1249,6 +1267,9 @@ pub struct AdpcmDecoder {
     // Dialogic / OKI VOX is also stream-oriented (state persists across
     // packets — no per-block resets).
     dialogic_state: Vec<dialogic::Channel>,
+    // QuickTime IMA keeps each channel's predictor and step index from
+    // block to block, as FFmpeg does (`ffmpeg_adpcm::decode_qt_block`).
+    qt_state: Vec<ffmpeg_adpcm::QtChannel>,
     // G.726 is stream-oriented at the *bit* level: codec state carries
     // across packets and, at the 3- and 5-bit rates, so does a partial
     // code word (the unpacker's residual bits). The rate and in-byte
@@ -1278,6 +1299,9 @@ pub struct AdpcmDecoder {
     // word expanded back to 16-bit linear (the output PCM sits on the
     // law lattice). `None` ⇒ the linear interface.
     g726_law: Option<g726::Law>,
+    // The linear interface's decoder per lane: FFmpeg's (`ffmpeg_g726`).
+    // `g726_states` serve the law interface.
+    g726_ffmpeg: Vec<ffmpeg_g726::Decoder>,
     eof: bool,
 }
 
@@ -1373,7 +1397,7 @@ impl AdpcmDecoder {
                     (pkt.data.len() / blk) * ima_qt::QT_SAMPLES_PER_BLOCK * channels,
                 );
                 for chunk in pkt.data.chunks_exact(blk) {
-                    let block_pcm = ima_qt::decode_block(chunk, channels)?;
+                    let block_pcm = ffmpeg_adpcm::decode_qt_block(chunk, &mut self.qt_state)?;
                     out.extend_from_slice(&block_pcm);
                 }
                 out
@@ -1384,12 +1408,10 @@ impl AdpcmDecoder {
                 &mut self.yamaha_a_state,
                 yamaha_a::Output::Wide16,
             ),
-            Variant::Dialogic => dialogic::decode_packet(
-                &pkt.data,
-                &mut self.dialogic_state,
-                self.dialogic_order,
-                dialogic::Output::Wide16,
-            ),
+            // FFmpeg's `adpcm_ima_oki` rounding (`ffmpeg_adpcm`).
+            Variant::Dialogic => {
+                ffmpeg_adpcm::decode_oki_packet(&pkt.data, &mut self.dialogic_state, self.dialogic_order)
+            }
             Variant::G726 => {
                 // Under the WAV sub-block framing, strip the per-block
                 // auxiliary prefix first (position persists across
@@ -1418,7 +1440,7 @@ impl AdpcmDecoder {
                     None => codes
                         .iter()
                         .enumerate()
-                        .map(|(n, &c)| self.g726_states[n % lanes].decode_i16(c))
+                        .map(|(n, &c)| self.g726_ffmpeg[n % lanes].decode(c))
                         .collect(),
                     Some(law) => {
                         // Log-PCM interface: §4.2.8 COMPRESS + SYNC per
@@ -1463,6 +1485,12 @@ impl AdpcmDecoder {
 impl Decoder for AdpcmDecoder {
     fn codec_id(&self) -> &CodecId {
         &self.codec_id
+    }
+
+    /// Interleaved 16-bit samples for every variant, whatever the container
+    /// declares.
+    fn output_audio_format(&self) -> Option<AudioFormat> {
+        Some(AudioFormat { sample_format: SampleFormat::S16, sample_rate: self.sample_rate?, channels: self.channels })
     }
 
     fn send_packet(&mut self, packet: &Packet) -> Result<()> {
@@ -1510,6 +1538,15 @@ impl Decoder for AdpcmDecoder {
         }
         for st in &mut self.g726_states {
             *st = g726::State::new(self.g726_rate);
+        }
+        // A fresh decoder: FFmpeg's flush (`g726_reset`) leaves part of the
+        // predictor state behind, which only makes a seek's start differ.
+        for d in &mut self.g726_ffmpeg {
+            *d = ffmpeg_g726::Decoder::new(self.g726_rate);
+        }
+        // FFmpeg's flush zeroes the QuickTime IMA state.
+        for st in &mut self.qt_state {
+            *st = ffmpeg_adpcm::QtChannel::default();
         }
         self.g726_unpacker = g726::BitUnpacker::new(self.g726_order);
         self.g726_block_pos = 0;

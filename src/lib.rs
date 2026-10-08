@@ -17,6 +17,10 @@
 //! - **`adpcm_g726`** — ITU-T G.726 narrowband ADPCM at 40 / 32 / 24 /
 //!   16 kbit/s (5/4/3/2 bits per sample; 32 kbit/s default, WAV tag
 //!   `0x0040` = `WAVE_FORMAT_G721_ADPCM` for the 4-bit rate).
+//! - **`adpcm_ct`** — Creative ADPCM (WAV tag `0x0200`, VOC codec
+//!   `0x0200`) and **`adpcm_sbpro_2`** / **`adpcm_sbpro_3`** /
+//!   **`adpcm_sbpro_4`** — the Sound Blaster Pro 2-, 2.6- and 4-bit
+//!   ADPCM of VOC files. Decoders only.
 //!
 //! G.722 / G.723.1 / G.729 are *not* handled here — they live in their
 //! own crates.
@@ -39,8 +43,12 @@
 //! # Specs and citations
 //!
 //! All tables in [`tables`] are normative constants transcribed from public
-//! specifications — see the README for the specific documents. No decoder
-//! source was read while writing this crate.
+//! specifications — see the README for the specific documents. Two files
+//! are ports of FFmpeg 2da55bf instead, so the decoders give FFmpeg's
+//! output (LGPL-2.1-or-later, see `LICENSE-LGPL`): `src/ffmpeg_adpcm.rs`
+//! (QuickTime IMA's state from block to block, OKI's rounding, the Creative
+//! and Sound Blaster decoders) and `src/ffmpeg_g726.rs` (the G.726
+//! decoder's linear output).
 
 #![deny(unsafe_code)]
 #![allow(clippy::needless_range_loop)]
@@ -56,6 +64,11 @@ pub mod tables;
 pub mod yamaha;
 pub mod yamaha_a;
 
+pub mod ffmpeg_adpcm;
+pub mod ffmpeg_g726;
+
+pub use ffmpeg_adpcm::{CODEC_ID_CT, CODEC_ID_SBPRO_2, CODEC_ID_SBPRO_3, CODEC_ID_SBPRO_4};
+
 use oxideav_core::{CodecCapabilities, CodecId, CodecTag};
 use oxideav_core::{CodecInfo, CodecRegistry};
 
@@ -66,6 +79,11 @@ pub const CODEC_ID_MS: &str = "adpcm_ms";
 /// Canonical codec id for Microsoft IMA ADPCM (WAV variant).
 pub const CODEC_ID_IMA_WAV: &str = "adpcm_ima_wav";
 /// Canonical codec id for Apple QuickTime IMA ADPCM.
+///
+/// The registry decoder keeps each channel's predictor and step index from
+/// block to block as FFmpeg does; a block header replaces them only when
+/// its step index differs or its 9-bit predictor is more than 127 away
+/// ([`ima_qt::decode_block`] decodes one block on its own).
 pub const CODEC_ID_IMA_QT: &str = "adpcm_ima_qt";
 /// Canonical codec id for Yamaha ADPCM-B / DELTA-T (Y8950, YM2608-B,
 /// YMZ280B, AICA — WAV tag `0x0020`).
@@ -94,6 +112,10 @@ pub const CODEC_ID_YAMAHA_A: &str = "adpcm_yamaha_a";
 /// to this codec by tag. That tag's 4-bit body is the canonical VOX
 /// layout (two samples per byte, high nibble first), so the existing
 /// decode path is byte-identical.
+///
+/// The registry decoder steps as FFmpeg's `adpcm_ima_oki` does,
+/// `((2 * magnitude + 1) * step) >> 3`; [`dialogic::decode_packet`] keeps
+/// the application note's sum of shifted steps, which rounds differently.
 pub const CODEC_ID_DIALOGIC: &str = "adpcm_dialogic";
 /// Canonical codec id for ITU-T **G.726** narrowband ADPCM
 /// (40 / 32 / 24 / 16 kbit/s; Recommendation G.726, 12/1990).
@@ -101,15 +123,22 @@ pub const CODEC_ID_DIALOGIC: &str = "adpcm_dialogic";
 /// Single-channel 8 kHz telephony codec; the operating rate is selected
 /// by the `bits_per_sample` codec option (2/3/4/5; default 4 =
 /// 32 kbit/s — the rate whose bit-exact behaviour matches the older
-/// G.721, hence the `WAVE_FORMAT_G721_ADPCM` = `0x0040` tag routing).
+/// G.721, hence the `WAVE_FORMAT_G721_ADPCM` = `0x0040` tag routing), or
+/// else by the container's `bits_per_coded_sample` (WAV `wBitsPerSample`).
 /// The `bit_order` option picks the in-byte code packing (`msb` default
 /// / `lsb`). The stream is headerless and bit-continuous: codec state
 /// *and* partial code words carry across packet boundaries.
+///
+/// The registry decoder's linear output is FFmpeg's G.726 decoder
+/// ([`ffmpeg_g726`]), which is not the ITU arithmetic: on an ITU-made
+/// 40 kbit/s stream it can read far from the ITU decode. The `law`
+/// interfaces and [`g726::State`] stay ITU-exact.
 pub const CODEC_ID_G726: &str = "adpcm_g726";
 
 /// Register every ADPCM variant with `reg`. Decoders **and** encoders
-/// for all seven variants (MS-ADPCM, IMA-ADPCM-WAV, IMA-ADPCM-QT,
-/// Yamaha-ADPCM-B, Yamaha-ADPCM-A, OKI/Dialogic VOX, ITU-T G.726).
+/// for seven variants (MS-ADPCM, IMA-ADPCM-WAV, IMA-ADPCM-QT,
+/// Yamaha-ADPCM-B, Yamaha-ADPCM-A, OKI/Dialogic VOX, ITU-T G.726), and
+/// decoders for Creative ADPCM and the Sound Blaster Pro ADPCMs.
 pub fn register_codecs(reg: &mut CodecRegistry) {
     // adpcm_ms — WAVE_FORMAT_ADPCM = 0x0002.
     reg.register(
@@ -121,7 +150,9 @@ pub fn register_codecs(reg: &mut CodecRegistry) {
             )
             .decoder(decoder::make_decoder)
             .encoder(encoder::make_encoder)
-            .tag(CodecTag::wave_format(0x0002)),
+            .tag(CodecTag::wave_format(0x0002))
+            // QuickTime's `ms\0\x02` (FFmpeg's `ff_codec_movaudio_tags`).
+            .tag(CodecTag::fourcc(b"ms\x00\x02")),
     );
     // adpcm_ima_wav — WAVE_FORMAT_DVI_ADPCM = 0x0011.
     reg.register(
@@ -133,7 +164,9 @@ pub fn register_codecs(reg: &mut CodecRegistry) {
             )
             .decoder(decoder::make_decoder)
             .encoder(encoder::make_encoder)
-            .tag(CodecTag::wave_format(0x0011)),
+            .tag(CodecTag::wave_format(0x0011))
+            // QuickTime's `ms\0\x11` (FFmpeg's `ff_codec_movaudio_tags`).
+            .tag(CodecTag::fourcc(b"ms\x00\x11")),
     );
     // adpcm_ima_qt — QuickTime fourcc `ima4`.
     reg.register(
@@ -233,6 +266,27 @@ pub fn register_codecs(reg: &mut CodecRegistry) {
             .tag(CodecTag::wave_format(0x0045))
             .tag(CodecTag::wave_format(0x0064)),
     );
+    // Creative ADPCM (WAVE_FORMAT_CREATIVE_ADPCM = 0x0200, VOC codec
+    // 0x0200) and the Sound Blaster Pro ADPCMs of VOC files (codecs 1-3):
+    // decoders only, FFmpeg's (`ffmpeg_adpcm`).
+    for (id, tag) in [
+        (CODEC_ID_CT, Some(0x0200)),
+        (CODEC_ID_SBPRO_2, None),
+        (CODEC_ID_SBPRO_3, None),
+        (CODEC_ID_SBPRO_4, None),
+    ] {
+        let mut info = CodecInfo::new(CodecId::new(id))
+            .capabilities(
+                CodecCapabilities::audio(format!("{id}_sw"))
+                    .with_lossy(true)
+                    .with_intra_only(false),
+            )
+            .decoder(ffmpeg_adpcm::make_creative_decoder);
+        if let Some(tag) = tag {
+            info = info.tag(CodecTag::wave_format(tag));
+        }
+        reg.register(info);
+    }
 }
 
 /// Unified registration entry point — installs every ADPCM variant

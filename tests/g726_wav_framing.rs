@@ -13,7 +13,7 @@ use oxideav_adpcm::g726::{
     self, wav_block_align, wav_decode_packet, wav_encode_packet, wav_pack_codes,
     wav_rate_supported, wav_strip_aux, wav_subblock_bytes, wav_unpack_codes, Rate, State,
 };
-use oxideav_adpcm::CODEC_ID_G726;
+use oxideav_adpcm::{ffmpeg_g726, CODEC_ID_G726};
 use oxideav_core::{CodecId, CodecParameters, CodecRegistry, Frame, Packet, TimeBase};
 
 // ---------------------------------------------------------------------------
@@ -330,6 +330,15 @@ fn registry_decode(p: &CodecParameters, bytes: &[u8], pkt_len: usize) -> Vec<i16
     out
 }
 
+/// The registry's linear output for an aux-free WAV-framing payload: its
+/// codes ([`wav_unpack_codes`], time-major) round-robin over one decoder
+/// per channel, FFmpeg's (`ffmpeg_g726`).
+fn lanes_decode(payload: &[u8], rate: Rate, channels: u16) -> Vec<i16> {
+    let codes = wav_unpack_codes(payload, rate, channels).unwrap();
+    let mut lanes: Vec<ffmpeg_g726::Decoder> = (0..channels).map(|_| ffmpeg_g726::Decoder::new(rate)).collect();
+    codes.iter().enumerate().map(|(n, &c)| lanes[n % channels as usize].decode(c)).collect()
+}
+
 #[test]
 fn registry_wav_decode_matches_direct_api() {
     for &(rate, bits) in &[(Rate::R24, "3"), (Rate::R32, "4"), (Rate::R40, "5")] {
@@ -339,8 +348,7 @@ fn registry_wav_decode_matches_direct_api() {
             let mut enc: Vec<State> = (0..channels).map(|_| State::new(rate)).collect();
             let bytes = wav_encode_packet(&pcm, &mut enc).unwrap();
 
-            let mut direct: Vec<State> = (0..channels).map(|_| State::new(rate)).collect();
-            let want = wav_decode_packet(&bytes, &mut direct).unwrap();
+            let want = lanes_decode(&bytes, rate, channels);
 
             // Odd packet split (7 bytes) exercises sub-block straddling.
             let got = registry_decode(&wav_params(channels, bits, &[]), &bytes, 7);
@@ -370,8 +378,7 @@ fn registry_wav_decode_strips_aux_across_packet_splits() {
     let p = wav_params(1, "3", &[("aux_block_size", "4")]);
     // Whole-buffer decode and a 5-byte packet split (which lands
     // mid-prefix and mid-sub-block) must agree with the aux-free path.
-    let mut direct = [State::new(rate)];
-    let want = wav_decode_packet(&payload, &mut direct).unwrap();
+    let want = lanes_decode(&payload, rate, 1);
     assert_eq!(registry_decode(&p, &data, data.len()), want);
     assert_eq!(registry_decode(&p, &data, 5), want);
 }
@@ -617,8 +624,7 @@ fn registry_wav_decoder_reads_aux_from_extradata() {
         data.extend_from_slice(chunk);
     }
 
-    let mut direct = [State::new(rate)];
-    let want = wav_decode_packet(&payload, &mut direct).unwrap();
+    let want = lanes_decode(&payload, rate, 1);
 
     // The demuxer hands the fmt extension through extradata: no
     // aux_block_size option, nAuxBlockSize = 4 on the wire.
