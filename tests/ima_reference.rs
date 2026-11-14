@@ -25,7 +25,7 @@ use oxideav_adpcm::encoder::{
     ima_encode_block_3bit_reference, ima_encode_block_reference, ima_qt_encode_block_reference,
 };
 use oxideav_adpcm::ima_wav::{
-    ima_expand_code3, ima_expand_nibble, ima_quantize_code3, ima_quantize_nibble, ImaCodecState,
+    ImaCodecState, ima_expand_code3, ima_expand_nibble, ima_quantize_code3, ima_quantize_nibble,
 };
 use oxideav_adpcm::tables::IMA_STEP_SIZE;
 
@@ -228,7 +228,9 @@ fn step_table_matches_the_recommendation_listing() {
     assert_eq!(IMA_STEP_SIZE[88], 32767);
     assert_eq!(
         &IMA_STEP_SIZE[80..],
-        &[15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767]
+        &[
+            15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767
+        ]
     );
 }
 
@@ -500,6 +502,7 @@ fn qt_block_encoder_nibbles_match_oracle() {
     let pcm = test_signal(64 * n_blocks, 1);
     let mut states = vec![ImaCodecState::default(); 1];
     let mut carried_index = 0i32;
+    let mut carried_predictor = 0i32;
     for chunk in pcm.chunks(64) {
         let blk = ima_qt_encode_block_reference(chunk, 1, &mut states).unwrap();
         let preamble = u16::from_be_bytes([blk[0], blk[1]]);
@@ -507,7 +510,12 @@ fn qt_block_encoder_nibbles_match_oracle() {
         assert_eq!(seed, (chunk[0] as i32) & !0x7F, "preamble predictor seed");
         assert_eq!((preamble & 0x7F) as i32, carried_index, "preamble index");
 
-        let mut p = seed;
+        // A preamble within 127 of the carried predictor continues from the full-precision predictor (stream decoding).
+        let mut p = if (carried_predictor - seed).abs() < 128 {
+            carried_predictor
+        } else {
+            seed
+        };
         let mut idx = carried_index;
         for (i, &byte) in blk[2..34].iter().enumerate() {
             let lo = oracle_compress_4bit(&mut p, &mut idx, chunk[i * 2]);
@@ -515,7 +523,9 @@ fn qt_block_encoder_nibbles_match_oracle() {
             assert_eq!(byte, (hi << 4) | lo, "body byte {i}");
         }
         carried_index = idx;
+        carried_predictor = p;
         assert_eq!(states[0].step_index, idx, "carried state index");
+        assert_eq!(states[0].predictor, p, "carried state predictor");
     }
 }
 

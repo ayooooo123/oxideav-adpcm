@@ -27,7 +27,11 @@ struct Float11 {
 
 /// `av_log2_16bit`: floor(log2) of the low 16 bits, 0 for 0.
 fn log2_16bit(v: u32) -> u32 {
-    let (v, n) = if v & 0xff00 != 0 { ((v >> 8) & 0xff, 8) } else { (v & 0xff, 0) };
+    let (v, n) = if v & 0xff00 != 0 {
+        ((v >> 8) & 0xff, 8)
+    } else {
+        (v & 0xff, 0)
+    };
     n + if v == 0 { 0 } else { 31 - v.leading_zeros() }
 }
 
@@ -36,24 +40,32 @@ fn i2f(i: i32) -> Float11 {
     let sign = u8::from(i < 0);
     let i = i.wrapping_abs();
     let exp = log2_16bit(i as u32) + u32::from(i != 0);
-    let mant = if i != 0 { (((i << 6) >> exp) & 0xff) as u8 } else { 1 << 5 };
-    Float11 { sign, exp: exp as u8, mant }
+    let mant = if i != 0 {
+        (((i << 6) >> exp) & 0xff) as u8
+    } else {
+        1 << 5
+    };
+    Float11 {
+        sign,
+        exp: exp as u8,
+        mant,
+    }
 }
 
 /// `mult`, its result truncated to 16 bits as FFmpeg's `int16_t` is.
 fn mult(f1: Float11, f2: Float11) -> i16 {
     let exp = i32::from(f1.exp) + i32::from(f2.exp);
     let mut res = (i32::from(f1.mant) * i32::from(f2.mant) + 0x30) >> 4;
-    res = if exp > 19 { res << (exp - 19) } else { res >> (19 - exp) };
+    res = if exp > 19 {
+        res << (exp - 19)
+    } else {
+        res >> (19 - exp)
+    };
     (if f1.sign ^ f2.sign != 0 { -res } else { res }) as i16
 }
 
 fn sgn(value: i32) -> i32 {
-    if value < 0 {
-        -1
-    } else {
-        1
-    }
+    if value < 0 { -1 } else { 1 }
 }
 
 struct Tables {
@@ -70,26 +82,93 @@ const IQUANT24: [i16; 8] = [i16::MIN, 135, 273, 373, 373, 273, 135, i16::MIN];
 const W24: [i16; 8] = [-4, 30, 137, 582, 582, 137, 30, -4];
 const F24: [u8; 8] = [0, 1, 2, 7, 7, 2, 1, 0];
 
-const IQUANT32: [i16; 16] = [i16::MIN, 4, 135, 213, 273, 323, 373, 425, 425, 373, 323, 273, 213, 135, 4, i16::MIN];
-const W32: [i16; 16] = [-12, 18, 41, 64, 112, 198, 355, 1122, 1122, 355, 198, 112, 64, 41, 18, -12];
+const IQUANT32: [i16; 16] = [
+    i16::MIN,
+    4,
+    135,
+    213,
+    273,
+    323,
+    373,
+    425,
+    425,
+    373,
+    323,
+    273,
+    213,
+    135,
+    4,
+    i16::MIN,
+];
+const W32: [i16; 16] = [
+    -12, 18, 41, 64, 112, 198, 355, 1122, 1122, 355, 198, 112, 64, 41, 18, -12,
+];
 const F32: [u8; 16] = [0, 0, 0, 1, 1, 1, 3, 7, 7, 3, 1, 1, 1, 0, 0, 0];
 
 const IQUANT40: [i16; 32] = [
-    i16::MIN, -66, 28, 104, 169, 224, 274, 318, 358, 395, 429, 459, 488, 514, 539, 566, 566, 539, 514, 488, 459, 429,
-    395, 358, 318, 274, 224, 169, 104, 28, -66, i16::MIN,
+    i16::MIN,
+    -66,
+    28,
+    104,
+    169,
+    224,
+    274,
+    318,
+    358,
+    395,
+    429,
+    459,
+    488,
+    514,
+    539,
+    566,
+    566,
+    539,
+    514,
+    488,
+    459,
+    429,
+    395,
+    358,
+    318,
+    274,
+    224,
+    169,
+    104,
+    28,
+    -66,
+    i16::MIN,
 ];
 const W40: [i16; 32] = [
-    14, 14, 24, 39, 40, 41, 58, 100, 141, 179, 219, 280, 358, 440, 529, 696, 696, 529, 440, 358, 280, 219, 179, 141,
-    100, 58, 41, 40, 39, 24, 14, 14,
+    14, 14, 24, 39, 40, 41, 58, 100, 141, 179, 219, 280, 358, 440, 529, 696, 696, 529, 440, 358,
+    280, 219, 179, 141, 100, 58, 41, 40, 39, 24, 14, 14,
 ];
-const F40: [u8; 32] = [0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 3, 4, 5, 6, 6, 6, 6, 5, 4, 3, 2, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0];
+const F40: [u8; 32] = [
+    0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 3, 4, 5, 6, 6, 6, 6, 5, 4, 3, 2, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0,
+];
 
 fn tables(rate: Rate) -> Tables {
     match rate.bits() {
-        2 => Tables { iquant: &IQUANT16, w: &W16, f: &F16 },
-        3 => Tables { iquant: &IQUANT24, w: &W24, f: &F24 },
-        4 => Tables { iquant: &IQUANT32, w: &W32, f: &F32 },
-        _ => Tables { iquant: &IQUANT40, w: &W40, f: &F40 },
+        2 => Tables {
+            iquant: &IQUANT16,
+            w: &W16,
+            f: &F16,
+        },
+        3 => Tables {
+            iquant: &IQUANT24,
+            w: &W24,
+            f: &F24,
+        },
+        4 => Tables {
+            iquant: &IQUANT32,
+            w: &W32,
+            f: &F32,
+        },
+        _ => Tables {
+            iquant: &IQUANT40,
+            w: &W40,
+            f: &F40,
+        },
     }
 }
 
@@ -170,7 +249,11 @@ impl Decoder {
         // Transition detect.
         let ylint = self.yl >> 15;
         let ylfrac = (self.yl >> 10) & 0x1f;
-        let thr2 = if ylint > 9 { 0x1f << 10 } else { (0x20 + ylfrac) << ylint };
+        let thr2 = if ylint > 9 {
+            0x1f << 10
+        } else {
+            (0x20 + ylfrac) << ylint
+        };
         let tr = self.td == 1 && dq > ((3 * thr2) >> 2);
 
         if i_sig != 0 {
@@ -179,7 +262,11 @@ impl Decoder {
         let re_signal = i32::from((self.se + dq) as i16);
 
         // Second order predictor coefficients A2 and A1.
-        let pk0 = if self.sez + dq != 0 { sgn(self.sez + dq) } else { 0 };
+        let pk0 = if self.sez + dq != 0 {
+            sgn(self.sez + dq)
+        } else {
+            0
+        };
         let dq0 = if dq != 0 { sgn(dq) } else { 0 };
         if tr {
             self.a = [0; 2];
@@ -216,7 +303,10 @@ impl Decoder {
             self.ap = 256;
         } else {
             self.ap += (-self.ap) >> 4;
-            if self.y <= 1535 || self.td != 0 || ((self.dms << 2) - self.dml).abs() >= (self.dml >> 3) {
+            if self.y <= 1535
+                || self.td != 0
+                || ((self.dms << 2) - self.dml).abs() >= (self.dml >> 3)
+            {
                 self.ap += 0x20;
             }
         }

@@ -60,6 +60,7 @@ pub enum NibbleOrder {
 
 /// PCM-sample width the decoder returns.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Output {
     /// Native silicon output — signed 12-bit value in an i16 carrier
     /// (range `-2048..=2047`).
@@ -559,12 +560,16 @@ mod tests {
         assert_eq!(RESET_PREAMBLE_BYTES, 24);
         assert_eq!(RESET_PREAMBLE_SAMPLES, 48);
         // §5 byte values: 0x80 for hi-first, 0x08 for lo-first.
-        assert!(reset_preamble(NibbleOrder::HiFirst)
-            .iter()
-            .all(|&b| b == 0x80));
-        assert!(reset_preamble(NibbleOrder::LoFirst)
-            .iter()
-            .all(|&b| b == 0x08));
+        assert!(
+            reset_preamble(NibbleOrder::HiFirst)
+                .iter()
+                .all(|&b| b == 0x80)
+        );
+        assert!(
+            reset_preamble(NibbleOrder::LoFirst)
+                .iter()
+                .all(|&b| b == 0x08)
+        );
     }
 
     #[test]

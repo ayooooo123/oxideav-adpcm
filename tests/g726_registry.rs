@@ -7,7 +7,7 @@
 //! bit-level packet-boundary continuity that distinguishes G.726 from
 //! the nibble-aligned variants, and the factory reject paths.
 
-use oxideav_adpcm::{g726, CODEC_ID_G726};
+use oxideav_adpcm::{CODEC_ID_G726, g726};
 use oxideav_core::{
     CodecId, CodecParameters, CodecRegistry, CodecTag, Decoder, Frame, Packet, ProbeContext,
     TimeBase,
@@ -87,7 +87,7 @@ fn round_trip(
         dec.send_packet(&Packet::new(0, tb, chunk.to_vec()))
             .expect("send_packet");
         if let Ok(Frame::Audio(af)) = dec.receive_frame() {
-            for pair in af.data[0].chunks_exact(2) {
+            for pair in af.data[0].as_chunks::<2>().0 {
                 out.push(i16::from_le_bytes([pair[0], pair[1]]));
             }
         }
@@ -118,7 +118,11 @@ fn registry_round_trip_all_rates_both_orders() {
             // Flush padding may append trailing zero codes.
             assert!(decoded.len() >= pcm.len(), "bits={bits} order={order}");
             let rate = g726::Rate::from_bits(bits_n as u8).unwrap();
-            let bit_order = if order == "msb" { g726::BitOrder::MsbFirst } else { g726::BitOrder::LsbFirst };
+            let bit_order = if order == "msb" {
+                g726::BitOrder::MsbFirst
+            } else {
+                g726::BitOrder::LsbFirst
+            };
             let mut codes = Vec::new();
             g726::BitUnpacker::new(bit_order).feed(&bytes, rate.bits(), &mut codes);
             let mut itu = g726::State::new(rate);
@@ -251,7 +255,7 @@ fn decoder_reset_reseeds_codec_state_and_bit_buffer() {
             dec.send_packet(&Packet::new(0, tb, chunk.to_vec()))
                 .unwrap();
             if let Ok(Frame::Audio(af)) = dec.receive_frame() {
-                for pair in af.data[0].chunks_exact(2) {
+                for pair in af.data[0].as_chunks::<2>().0 {
                     out.push(i16::from_le_bytes([pair[0], pair[1]]));
                 }
             }
@@ -275,7 +279,9 @@ fn law_fixture(name: &str) -> Vec<u8> {
     p.push("g726");
     p.push(name);
     let raw = std::fs::read(&p).unwrap_or_else(|e| panic!("reading {}: {e}", p.display()));
-    raw.chunks_exact(2)
+    raw.as_chunks::<2>()
+        .0
+        .iter()
         .map(|w| {
             assert_eq!(w[1], 0, "{name}: non-octet word");
             w[0]
@@ -309,7 +315,7 @@ fn registry_law_decode_reproduces_conformance_vectors() {
                 dec.send_packet(&Packet::new(0, tb, chunk.to_vec()))
                     .unwrap();
                 if let Ok(Frame::Audio(af)) = dec.receive_frame() {
-                    for pair in af.data[0].chunks_exact(2) {
+                    for pair in af.data[0].as_chunks::<2>().0 {
                         got.push(i16::from_le_bytes([pair[0], pair[1]]));
                     }
                 }

@@ -20,7 +20,7 @@
 //! `2 + 2 * (body_bytes / channels)` samples per channel (2 prelude + one
 //! sample per nibble, each body byte carrying two nibbles).
 
-use crate::tables::{MS_ADAPTATION, MS_ADAPT_COEFF1, MS_ADAPT_COEFF2};
+use crate::tables::{MS_ADAPT_COEFF1, MS_ADAPT_COEFF2, MS_ADAPTATION};
 use oxideav_core::{Error, Result};
 
 /// One Microsoft-ADPCM predictor coefficient set: `(iCoef1, iCoef2)`, the
@@ -186,7 +186,8 @@ fn decode_nibble(st: &mut ChannelState, nibble: u8) -> i16 {
     // overflowing i32 — both are constrained to i16 by the time they
     // re-enter as history but the *first* call reads sample1/sample2 from
     // the block header, which can be any 16-bit value.
-    let predicted = (st.sample1 as i64 * st.coef1 as i64 + st.sample2 as i64 * st.coef2 as i64) / 256;
+    let predicted =
+        (st.sample1 as i64 * st.coef1 as i64 + st.sample2 as i64 * st.coef2 as i64) / 256;
 
     // Add error term (saturating; `delta` is a header-supplied i32 that
     // can be arbitrary on malformed input).
@@ -365,7 +366,7 @@ mod tests {
         block.extend_from_slice(&100i16.to_le_bytes()); // initial delta
         block.extend_from_slice(&500i16.to_le_bytes()); // sample1
         block.extend_from_slice(&300i16.to_le_bytes()); // sample2
-                                                        // No body bytes.
+        // No body bytes.
         let pcm = decode_block(&block, 1).unwrap();
         // Prelude emits sample2 then sample1.
         assert_eq!(pcm, vec![300, 500]);

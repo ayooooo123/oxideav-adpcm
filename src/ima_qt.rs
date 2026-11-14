@@ -36,11 +36,49 @@ pub const QT_SAMPLES_PER_BLOCK: usize = 64;
 /// surround layouts (mono / stereo / 4.0 / 5.1 / 7.1).
 pub const QT_MAX_CHANNELS: usize = 8;
 
+/// One channel's running decoder state between QT-IMA blocks.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct QtChannel {
+    predictor: i32,
+    step_index: i32,
+    valid: bool,
+}
+
+/// Whether a block's preamble predictor `seed` (top 9 bits, low 7 bits
+/// zero) agrees with a channel's running `predictor`: the two lie less
+/// than one preamble quantum (128) apart, so the preamble is the running
+/// predictor truncated *or* rounded up to 9 bits. Black-box behaviour of
+/// macOS's IMA4 decoder: it keeps its running predictor for seeds
+/// `predictor - 127 ..= predictor + 127` (with an equal step index) and
+/// reseeds for anything farther, including a seed exactly 128 above a
+/// predictor whose low 7 bits are zero.
+#[doc(hidden)]
+pub fn preamble_agrees(predictor: i32, seed: i32) -> bool {
+    (predictor - seed).abs() < 128
+}
+
 /// Decode `channels` contiguous 34-byte QT-IMA blocks into interleaved i16.
 ///
 /// Returns `64 * channels` i16 samples (one packet of QT-IMA = 64 samples
-/// per channel, block-level-interleaved across the channels).
+/// per channel, block-level-interleaved across the channels). Every block
+/// is seeded from its own preamble; [`decode_block_continuous`] carries
+/// state from block to block instead.
 pub fn decode_block(data: &[u8], channels: usize) -> Result<Vec<i16>> {
+    let mut state = vec![QtChannel::default(); channels.min(QT_MAX_CHANNELS)];
+    decode_block_continuous(data, channels, &mut state)
+}
+
+/// [`decode_block`] for a stream: each channel keeps its full-precision
+/// predictor from the previous block while the block's preamble agrees
+/// with it (the same step index, and a preamble predictor within 127 of
+/// the running one — see [`preamble_agrees`]). Only a preamble that
+/// disagrees (or the first block) reseeds the channel, as macOS's IMA4
+/// decoder does. `state` holds one entry per channel.
+pub fn decode_block_continuous(
+    data: &[u8],
+    channels: usize,
+    state: &mut [QtChannel],
+) -> Result<Vec<i16>> {
     if channels == 0 || channels > QT_MAX_CHANNELS {
         return Err(Error::unsupported(format!(
             "adpcm_ima_qt: channel count {channels} not supported (1..={QT_MAX_CHANNELS})"
@@ -51,6 +89,12 @@ pub fn decode_block(data: &[u8], channels: usize) -> Result<Vec<i16>> {
         return Err(Error::invalid(format!(
             "adpcm_ima_qt: need {needed} bytes for {channels}ch, got {}",
             data.len()
+        )));
+    }
+    if state.len() < channels {
+        return Err(Error::invalid(format!(
+            "adpcm_ima_qt: state for {} channels, need {channels}",
+            state.len()
         )));
     }
 
@@ -67,13 +111,22 @@ pub fn decode_block(data: &[u8], channels: usize) -> Result<Vec<i16>> {
         // i16 by the spec (so 0x8000 is most-negative), consistent with
         // how QuickTime stores it.
         let predictor_seed = preamble as i16 as i32 & !0x7F;
-
-        let mut predictor = predictor_seed;
-        let mut step_index = (preamble & 0x7F) as i32;
         // The spec requires clamping 0..127 to 0..=88.
-        if step_index > 88 {
-            step_index = 88;
+        let index_seed = ((preamble & 0x7F) as i32).min(88);
+
+        let st = &mut state[ch];
+        if !st.valid
+            || st.step_index != index_seed
+            || !preamble_agrees(st.predictor, predictor_seed)
+        {
+            *st = QtChannel {
+                predictor: predictor_seed,
+                step_index: index_seed,
+                valid: true,
+            };
         }
+        let mut predictor = st.predictor;
+        let mut step_index = st.step_index;
 
         // Decode 32 body bytes → 64 samples.
         for (i, &byte) in block[2..].iter().enumerate() {
@@ -84,6 +137,8 @@ pub fn decode_block(data: &[u8], channels: usize) -> Result<Vec<i16>> {
             out[(i * 2) * channels + ch] = s_lo;
             out[(i * 2 + 1) * channels + ch] = s_hi;
         }
+        st.predictor = predictor;
+        st.step_index = step_index;
     }
 
     Ok(out)
@@ -92,6 +147,72 @@ pub fn decode_block(data: &[u8], channels: usize) -> Result<Vec<i16>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A block whose preamble agrees with the running state continues
+    /// from the full-precision predictor (low 7 bits kept); one that
+    /// disagrees reseeds from its preamble.
+    #[test]
+    fn matching_preamble_keeps_the_running_predictor() {
+        // Block 1: seed 0 / index 0; code-1 nibbles add 1 per sample.
+        let mut first = [0x11u8; QT_BLOCK_SIZE];
+        first[0] = 0;
+        first[1] = 0;
+        let mut state = [QtChannel::default()];
+        decode_block_continuous(&first, 1, &mut state).unwrap();
+        let (p, idx) = (state[0].predictor, state[0].step_index);
+        assert_ne!(p & 0x7F, 0, "the running predictor has low bits");
+
+        // Block 2: preamble = the running state, all-zero body.
+        let mut second = [0u8; QT_BLOCK_SIZE];
+        let preamble = ((p as i16 as u16) & 0xFF80) | idx as u16;
+        second[..2].copy_from_slice(&preamble.to_be_bytes());
+        let continued = decode_block_continuous(&second, 1, &mut state).unwrap();
+        let (mut ep, mut ei) = (p, idx);
+        assert_eq!(continued[0], ima_expand_nibble(&mut ep, &mut ei, 0));
+
+        let reseeded = decode_block(&second, 1).unwrap();
+        let (mut rp, mut ri) = (p & !0x7F, idx);
+        assert_eq!(reseeded[0], ima_expand_nibble(&mut rp, &mut ri, 0));
+        assert_ne!(continued[0], reseeded[0]);
+
+        // A preamble with another step index reseeds.
+        let mut state2 = [QtChannel::default()];
+        decode_block_continuous(&first, 1, &mut state2).unwrap();
+        let mut other = second;
+        other[1] = (other[1] & 0x80) | ((idx as u8 + 1) & 0x7F);
+        let reseeds = decode_block_continuous(&other, 1, &mut state2).unwrap();
+        assert_eq!(reseeds, decode_block(&other, 1).unwrap());
+    }
+
+    /// Preamble agreement is a distance test, not a truncation match: a
+    /// seed rounded *up* to the next 9-bit value continues too, while a
+    /// seed 128 or more away reseeds (black-box macOS behaviour).
+    #[test]
+    fn preamble_agreement_window() {
+        assert!(preamble_agrees(3144, 3072)); // truncated
+        assert!(preamble_agrees(3144, 3200)); // rounded up
+        assert!(preamble_agrees(3200, 3200));
+        assert!(preamble_agrees(3073, 3200));
+        assert!(!preamble_agrees(3200, 3328)); // low bits 0, one quantum up
+        assert!(!preamble_agrees(3199, 3072 - 128));
+        assert!(preamble_agrees(-32768, -32768));
+        assert!(!preamble_agrees(-32768, -32640));
+
+        // Through the decoder: running state 64 / index 0 after block 1;
+        // a preamble seed of 128 (64 above) continues from 64.
+        let mut first = [0x11u8; QT_BLOCK_SIZE];
+        first[0] = 0;
+        first[1] = 0;
+        let mut state = [QtChannel::default()];
+        decode_block_continuous(&first, 1, &mut state).unwrap();
+        assert_eq!(state[0].predictor, 64);
+        let mut up = [0u8; QT_BLOCK_SIZE];
+        up[..2].copy_from_slice(&0x0080u16.to_be_bytes());
+        let continued = decode_block_continuous(&up, 1, &mut state).unwrap();
+        assert!(continued.iter().all(|&v| v == 64), "{:?}", &continued[..4]);
+        // A fresh channel seeds the same block at 128.
+        assert!(decode_block(&up, 1).unwrap().iter().all(|&v| v == 128));
+    }
 
     #[test]
     fn mono_zero_block_emits_64_samples() {

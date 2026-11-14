@@ -10,10 +10,10 @@
 //! bytes exactly.
 
 use oxideav_adpcm::g726::{
-    self, wav_block_align, wav_decode_packet, wav_encode_packet, wav_pack_codes,
-    wav_rate_supported, wav_strip_aux, wav_subblock_bytes, wav_unpack_codes, Rate, State,
+    self, Rate, State, wav_block_align, wav_decode_packet, wav_encode_packet, wav_pack_codes,
+    wav_rate_supported, wav_strip_aux, wav_subblock_bytes, wav_unpack_codes,
 };
-use oxideav_adpcm::{ffmpeg_g726, CODEC_ID_G726};
+use oxideav_adpcm::{CODEC_ID_G726, ffmpeg_g726};
 use oxideav_core::{CodecId, CodecParameters, CodecRegistry, Frame, Packet, TimeBase};
 
 // ---------------------------------------------------------------------------
@@ -322,7 +322,7 @@ fn registry_decode(p: &CodecParameters, bytes: &[u8], pkt_len: usize) -> Vec<i16
         dec.send_packet(&Packet::new(0, tb, chunk.to_vec()))
             .expect("send_packet");
         if let Ok(Frame::Audio(af)) = dec.receive_frame() {
-            for pair in af.data[0].chunks_exact(2) {
+            for pair in af.data[0].as_chunks::<2>().0 {
                 out.push(i16::from_le_bytes([pair[0], pair[1]]));
             }
         }
@@ -335,8 +335,14 @@ fn registry_decode(p: &CodecParameters, bytes: &[u8], pkt_len: usize) -> Vec<i16
 /// per channel, FFmpeg's (`ffmpeg_g726`).
 fn lanes_decode(payload: &[u8], rate: Rate, channels: u16) -> Vec<i16> {
     let codes = wav_unpack_codes(payload, rate, channels).unwrap();
-    let mut lanes: Vec<ffmpeg_g726::Decoder> = (0..channels).map(|_| ffmpeg_g726::Decoder::new(rate)).collect();
-    codes.iter().enumerate().map(|(n, &c)| lanes[n % channels as usize].decode(c)).collect()
+    let mut lanes: Vec<ffmpeg_g726::Decoder> = (0..channels)
+        .map(|_| ffmpeg_g726::Decoder::new(rate))
+        .collect();
+    codes
+        .iter()
+        .enumerate()
+        .map(|(n, &c)| lanes[n % channels as usize].decode(c))
+        .collect()
 }
 
 #[test]
@@ -413,13 +419,15 @@ fn registry_wav_option_validation() {
     // 2-bit rate has no WAV tag.
     assert!(reg.first_decoder(&wav_params(1, "2", &[])).is_err());
     // The bit-cell grid fixes MSB-first packing.
-    assert!(reg
-        .first_decoder(&wav_params(1, "4", &[("bit_order", "lsb")]))
-        .is_err());
+    assert!(
+        reg.first_decoder(&wav_params(1, "4", &[("bit_order", "lsb")]))
+            .is_err()
+    );
     // …but an explicit msb (the grid's order) stays accepted.
-    assert!(reg
-        .first_decoder(&wav_params(1, "4", &[("bit_order", "msb")]))
-        .is_ok());
+    assert!(
+        reg.first_decoder(&wav_params(1, "4", &[("bit_order", "msb")]))
+            .is_ok()
+    );
     // Stereo needs the WAV framing; the raw telephony stream is mono.
     let mut raw_stereo = CodecParameters::audio(CodecId::new(CODEC_ID_G726));
     raw_stereo.sample_rate = Some(8000);
@@ -438,9 +446,10 @@ fn registry_wav_option_validation() {
     aux_raw.options.insert("framing", "raw");
     assert!(reg.first_decoder(&aux_raw).is_err());
     // …and must be numeric.
-    assert!(reg
-        .first_decoder(&wav_params(1, "4", &[("aux_block_size", "some")]))
-        .is_err());
+    assert!(
+        reg.first_decoder(&wav_params(1, "4", &[("aux_block_size", "some")]))
+            .is_err()
+    );
     // framing is a G.726-only option.
     let mut ms = CodecParameters::audio(CodecId::new(oxideav_adpcm::CODEC_ID_MS));
     ms.sample_rate = Some(8000);
@@ -545,9 +554,10 @@ fn registry_wav_encoder_option_validation() {
     let reg = registry();
     // Mirrors of the decoder factory gates.
     assert!(reg.first_encoder(&wav_params(1, "2", &[])).is_err());
-    assert!(reg
-        .first_encoder(&wav_params(1, "4", &[("bit_order", "lsb")]))
-        .is_err());
+    assert!(
+        reg.first_encoder(&wav_params(1, "4", &[("bit_order", "lsb")]))
+            .is_err()
+    );
     assert!(reg.first_encoder(&wav_params(3, "4", &[])).is_err());
     assert!(reg.first_encoder(&wav_params(2, "4", &[])).is_ok());
     // Raw framing stays mono-only on the encode side too.
@@ -556,12 +566,14 @@ fn registry_wav_encoder_option_validation() {
     raw_stereo.channels = Some(2);
     assert!(reg.first_encoder(&raw_stereo).is_err());
     // The encoder emits aux-free blocks: aux_block_size must be 0.
-    assert!(reg
-        .first_encoder(&wav_params(1, "4", &[("aux_block_size", "4")]))
-        .is_err());
-    assert!(reg
-        .first_encoder(&wav_params(1, "4", &[("aux_block_size", "0")]))
-        .is_ok());
+    assert!(
+        reg.first_encoder(&wav_params(1, "4", &[("aux_block_size", "4")]))
+            .is_err()
+    );
+    assert!(
+        reg.first_encoder(&wav_params(1, "4", &[("aux_block_size", "0")]))
+            .is_ok()
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -1,8 +1,8 @@
 [package]
 name = "oxideav-adpcm"
-version = "0.0.7"
-edition = "2021"
-rust-version = "1.80"
+version = "0.0.8"
+edition = "2024"
+rust-version = "1.95"
 license = "MIT AND LGPL-2.1-or-later"
 authors = ["Mark Karpeles"]
 description = "Pure-Rust ADPCM audio decoders + encoders (Microsoft, IMA WAV/QuickTime, Yamaha A/B, OKI/Dialogic VOX) for oxideav"
@@ -36,4 +36,4 @@ harness = false
 # `Decoder::output_audio_format` is in the PearTube oxideav-core fork, not
 # yet on crates.io.
 [patch.crates-io]
-oxideav-core = { git = "https://github.com/ayooooo123/oxideav-core", rev = "57e5fa9cbf9eda25e4b992391c121a306f78cac4" }
+oxideav-core = { git = "https://github.com/ayooooo123/oxideav-core", rev = "cf8c6963d81e275f8eb86cffa32d9ce25fa51c84" }

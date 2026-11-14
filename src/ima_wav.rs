@@ -42,7 +42,7 @@
 //! channel, where the body must be a whole number of 12-byte groups per
 //! channel.
 
-use crate::tables::{IMA3_INDEX_ADJUST, IMA_INDEX_ADJUST, IMA_STEP_SIZE};
+use crate::tables::{IMA_INDEX_ADJUST, IMA_STEP_SIZE, IMA3_INDEX_ADJUST};
 use oxideav_core::{Error, Result};
 
 /// The IMA codec state pair shared by every expansion / quantization
@@ -266,7 +266,7 @@ pub fn decode_block_3bit(block: &[u8], channels: usize) -> Result<Vec<i16>> {
     let body = &block[header_len..];
     // Body must be a whole number of 12-byte groups per channel.
     let group_bytes = GROUP_BYTES_3BIT * channels;
-    if body.len() % group_bytes != 0 {
+    if !body.len().is_multiple_of(group_bytes) {
         return Err(Error::invalid(format!(
             "adpcm_ima_wav(3-bit): body length {} not a multiple of {} ({}ch × 12B group)",
             body.len(),
@@ -328,12 +328,9 @@ pub fn decode_block(block: &[u8], channels: usize) -> Result<Vec<i16>> {
     for ch in 0..channels {
         let base = ch * 4;
         let p = i16::from_le_bytes([block[base], block[base + 1]]) as i32;
-        let idx = block[base + 2] as i32;
-        if !(0..=88).contains(&idx) {
-            return Err(Error::invalid(format!(
-                "adpcm_ima_wav: step index {idx} out of range 0..=88 (ch {ch})"
-            )));
-        }
+        // A header step index past the table's end decodes as its last
+        // entry (88), as WAV IMA ADPCM decoders in the field treat it.
+        let idx = (block[base + 2] as i32).min(88);
         predictor.push(p);
         step_index.push(idx);
     }
@@ -341,7 +338,7 @@ pub fn decode_block(block: &[u8], channels: usize) -> Result<Vec<i16>> {
     let body = &block[header_len..];
     // Body must be a whole number of 4-byte groups per channel.
     let group_bytes = 4 * channels;
-    if body.len() % group_bytes != 0 {
+    if !body.len().is_multiple_of(group_bytes) {
         return Err(Error::invalid(format!(
             "adpcm_ima_wav: body length {} not a multiple of {} ({}ch × 4B group)",
             body.len(),
@@ -462,12 +459,20 @@ mod tests {
     }
 
     #[test]
-    fn rejects_bad_step_index() {
-        let mut block = Vec::new();
-        block.extend_from_slice(&0i16.to_le_bytes());
-        block.push(200); // > 88
-        block.push(0);
-        assert!(decode_block(&block, 1).is_err());
+    fn clamps_bad_step_index() {
+        let block = |idx: u8| {
+            let mut block = Vec::new();
+            block.extend_from_slice(&0i16.to_le_bytes());
+            block.push(idx);
+            block.push(0);
+            block.extend_from_slice(&[0x7f, 0x08, 0x80, 0xf0]);
+            block
+        };
+        // > 88 decodes as 88
+        assert_eq!(
+            decode_block(&block(200), 1).unwrap(),
+            decode_block(&block(88), 1).unwrap()
+        );
     }
 
     #[test]

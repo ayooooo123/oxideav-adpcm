@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `#[non_exhaustive]` on the growable public enums `Variant`, `encoder::Quantizer`, `yamaha::Chip`, `dialogic::Output` and `yamaha_a::Output`. `Shape` (block vs. stream), `dialogic::NibbleOrder`, `g726::Rate` (the four G.726 rates), `g726::Law` and `g726::BitOrder` stay exhaustive: their value sets are fixed.
+- `#[doc(hidden)]` on the `tables` module (step-size / index-adjust tables the per-format modules share).
+
 ### PearTube fork
 
 - Every variant FFmpeg also decodes now decodes as FFmpeg 2da55bf does,
@@ -34,6 +39,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Both decoders report their output (`output_audio_format`: interleaved
   S16), so a container's declared sample format no longer misleads.
   `oxideav-core` is patched to the PearTube fork for it.
+
+## [0.0.8](https://github.com/OxideAV/oxideav-adpcm/compare/v0.0.7...v0.0.8) - 2026-10-24
+
+### Fixed
+
+- fixup for #9: CHANGELOG entry
+- fixup for #8: preamble agreement is a ±127 window; encoders track the stream state
+
+### Other
+
+- a header step index past 88 decodes as 88
+- keep a channel's running predictor across blocks whose preamble agrees
+- edition 2024, MSRV 1.95
+- clippy 1.98: drain_collect — take the pending PCM/buffer Vecs with mem::take instead of drain(..).collect()
+
+### Changed
+
+- edition 2024, MSRV 1.95.
+- adpcm_ima_qt decoder keeps a channel's full-precision predictor across
+  blocks whose preamble agrees with the running state (same step index,
+  preamble predictor within 127 of the running one — truncated *or*
+  rounded up), reseeding only on disagreement; bit-identical to macOS's
+  IMA4 decoder on afconvert / ffmpeg streams and crafted probe streams
+  (was ~23–35 dB SNR from the dropped low 7 bits). New
+  `ima_qt::decode_block_continuous`; `decode_block` still reseeds each
+  block (#8).
+- adpcm_ima_qt encoders (search and reference quantizers) quantize from
+  the carried full-precision predictor whenever the block preamble agrees
+  with it, so the stream decodes the way the encoder modelled it. New
+  `encoder::ima_qt_encode_block_continuous`.
+- adpcm_ima_wav (4-bit) decodes a block whose header step index is
+  89..=255 with the index clamped to 88 instead of rejecting the block;
+  sample-exact with macOS AudioToolbox on random-header WAV files (#9).
+  The 3-bit path still rejects such a header (no black-box reference
+  decodes 3-bit IMA WAV).
 
 ## [0.0.7](https://github.com/OxideAV/oxideav-adpcm/compare/v0.0.6...v0.0.7) - 2026-08-20
 

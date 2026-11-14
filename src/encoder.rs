@@ -62,8 +62,8 @@ use crate::dialogic;
 use crate::g726;
 use crate::ima_wav;
 use crate::tables::{
-    IMA3_INDEX_ADJUST, IMA_INDEX_ADJUST, IMA_STEP_SIZE, MS_ADAPTATION, MS_ADAPT_COEFF1,
-    MS_ADAPT_COEFF2,
+    IMA_INDEX_ADJUST, IMA_STEP_SIZE, IMA3_INDEX_ADJUST, MS_ADAPT_COEFF1, MS_ADAPT_COEFF2,
+    MS_ADAPTATION,
 };
 use crate::yamaha;
 use crate::yamaha_a;
@@ -95,6 +95,7 @@ pub const DEFAULT_BLOCK_SIZE: usize = 256;
 ///   prescribes — so the byte stream matches what any other
 ///   spec-conforming reference compressor emits for the same input.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Quantizer {
     /// Decoder-loop search (best quality, crate-specific stream).
     #[default]
@@ -278,7 +279,7 @@ pub fn encode_block(samples: &[i16], channels: usize, target_block_size: usize) 
             "adpcm_ms encoder: channel count {channels} not supported (1 or 2)"
         )));
     }
-    if samples.len() % channels != 0 {
+    if !samples.len().is_multiple_of(channels) {
         return Err(Error::invalid(format!(
             "adpcm_ms encoder: sample count {} not divisible by {channels} channels",
             samples.len(),
@@ -606,7 +607,7 @@ pub fn ima_encode_block(samples: &[i16], channels: usize, block_size: usize) -> 
     }
     let body_len = block_size - header_len;
     let group_bytes = 4 * channels;
-    if body_len % group_bytes != 0 {
+    if !body_len.is_multiple_of(group_bytes) {
         return Err(Error::invalid(format!(
             "adpcm_ima_wav encoder: body length {body_len} not multiple of {group_bytes} ({channels}ch × 4B)"
         )));
@@ -740,7 +741,7 @@ pub fn ima_encode_block_reference(
     }
     let body_len = block_size - header_len;
     let group_bytes = 4 * channels;
-    if body_len % group_bytes != 0 {
+    if !body_len.is_multiple_of(group_bytes) {
         return Err(Error::invalid(format!(
             "adpcm_ima_wav encoder: body length {body_len} not multiple of {group_bytes} ({channels}ch × 4B)"
         )));
@@ -867,7 +868,7 @@ pub fn ima_encode_block_3bit(
     }
     let body_len = block_size - header_len;
     let group_bytes = GROUP_BYTES_3BIT * channels;
-    if body_len % group_bytes != 0 {
+    if !body_len.is_multiple_of(group_bytes) {
         return Err(Error::invalid(format!(
             "adpcm_ima_wav(3-bit) encoder: body length {body_len} not multiple of {group_bytes} ({channels}ch × 12B)"
         )));
@@ -983,7 +984,7 @@ pub fn ima_encode_block_3bit_reference(
     }
     let body_len = block_size - header_len;
     let group_bytes = GROUP_BYTES_3BIT * channels;
-    if body_len % group_bytes != 0 {
+    if !body_len.is_multiple_of(group_bytes) {
         return Err(Error::invalid(format!(
             "adpcm_ima_wav(3-bit) encoder: body length {body_len} not multiple of {group_bytes} ({channels}ch × 12B)"
         )));
@@ -1125,7 +1126,7 @@ impl ImaWavEncoder {
             other => {
                 return Err(Error::unsupported(format!(
                     "adpcm_ima_wav encoder: bits_per_sample {other} not supported (3 or 4)"
-                )))
+                )));
             }
         }
         self.refresh_container_fields();
@@ -1216,7 +1217,7 @@ impl Encoder for ImaWavEncoder {
             _ => {
                 return Err(Error::invalid(
                     "adpcm_ima_wav encoder: expected audio frame",
-                ))
+                ));
             }
         };
         push_audio_frame_pcm(&mut self.pcm, af, self.channels)?;
@@ -1259,7 +1260,61 @@ pub const QT_SAMPLES_PER_BLOCK: usize = 64;
 /// reconstructed first decoded sample will differ from the input by up to
 /// 64 LSB. This is inherent to the QT block format and not a property of the
 /// search loop.
+///
+/// Every block is encoded as if the decoder reseeds from its preamble,
+/// which is what [`crate::ima_qt::decode_block`] does. A stream decoder
+/// (the registry decoder, like macOS's) instead keeps a channel's
+/// full-precision predictor when the preamble agrees with its running
+/// state; [`ima_qt_encode_block_continuous`] tracks that state so the
+/// encoder's reconstruction matches such a decoder block after block.
 pub fn ima_qt_encode_block(samples: &[i16], channels: usize) -> Result<Vec<u8>> {
+    ima_qt_encode_block_search(samples, channels, None)
+}
+
+/// [`ima_qt_encode_block`] for a stream: `states` holds one
+/// [`ima_wav::ImaCodecState`] per channel (start from `Default`) and
+/// carries the decoder's running predictor / step index from block to
+/// block. When a block's preamble agrees with that state (the same step
+/// index, a preamble predictor within 127 of the running one) the
+/// nibbles are chosen from
+/// the full-precision running predictor, exactly as
+/// [`crate::ima_qt::decode_block_continuous`] will decode them.
+pub fn ima_qt_encode_block_continuous(
+    samples: &[i16],
+    channels: usize,
+    states: &mut [ima_wav::ImaCodecState],
+) -> Result<Vec<u8>> {
+    if states.len() != channels {
+        return Err(Error::invalid(format!(
+            "adpcm_ima_qt encoder: {} states for {channels} channels",
+            states.len()
+        )));
+    }
+    ima_qt_encode_block_search(samples, channels, Some(states))
+}
+
+/// The decoder's predictor for a QT block: the carried full-precision
+/// predictor when the preamble agrees with the carried state, the
+/// preamble seed otherwise (mirrors `ima_qt::decode_block_continuous`).
+fn qt_block_start_predictor(
+    carried: &ima_wav::ImaCodecState,
+    predictor_seed: i32,
+    step_index: i32,
+) -> i32 {
+    if carried.step_index == step_index
+        && crate::ima_qt::preamble_agrees(carried.predictor, predictor_seed)
+    {
+        carried.predictor
+    } else {
+        predictor_seed
+    }
+}
+
+fn ima_qt_encode_block_search(
+    samples: &[i16],
+    channels: usize,
+    mut states: Option<&mut [ima_wav::ImaCodecState]>,
+) -> Result<Vec<u8>> {
     if channels == 0 || channels > crate::ima_qt::QT_MAX_CHANNELS {
         return Err(Error::unsupported(format!(
             "adpcm_ima_qt encoder: channel count {channels} not supported (1..={})",
@@ -1305,11 +1360,7 @@ pub fn ima_qt_encode_block(samples: &[i16], channels: usize) -> Result<Vec<u8>> 
                 acc += (s1 - s0).unsigned_abs() as i64;
                 n += 1;
             }
-            if n == 0 {
-                0
-            } else {
-                (acc / n) as i32
-            }
+            if n == 0 { 0 } else { (acc / n) as i32 }
         };
         // For a magnitude-4 nibble (lo bit only) the decoder produces
         // diff = step/8 + step/4 = 3*step/8 ≈ 0.375 * step. So target
@@ -1333,8 +1384,12 @@ pub fn ima_qt_encode_block(samples: &[i16], channels: usize) -> Result<Vec<u8>> 
         out[block_off] = (preamble >> 8) as u8;
         out[block_off + 1] = (preamble & 0xFF) as u8;
 
+        let start = match states.as_deref() {
+            Some(carried) => qt_block_start_predictor(&carried[ch], predictor_seed, step_index),
+            None => predictor_seed,
+        };
         let mut st = ImaState {
-            predictor: predictor_seed,
+            predictor: start,
             step_index,
         };
         for i in 0..32 {
@@ -1347,6 +1402,12 @@ pub fn ima_qt_encode_block(samples: &[i16], channels: usize) -> Result<Vec<u8>> 
             let (n_hi, st_after_hi) = ima_best_nibble(&st, t_hi);
             st = st_after_hi;
             out[block_off + 2 + i] = (n_hi << 4) | n_lo;
+        }
+        if let Some(carried) = states.as_deref_mut() {
+            carried[ch] = ima_wav::ImaCodecState {
+                predictor: st.predictor,
+                step_index: st.step_index,
+            };
         }
     }
     Ok(out)
@@ -1365,7 +1426,10 @@ pub fn ima_qt_encode_block(samples: &[i16], channels: usize) -> Result<Vec<u8>> 
 /// quantised to the top 9 bits — the only seed the QT preamble can
 /// carry — and all 64 samples are quantized by the §6.1 ladder with no
 /// heuristic seeding, so the byte stream is fully determined by the
-/// input.
+/// input. When that preamble agrees with the carried state (the same
+/// index, a seed within 127 of the carried predictor) the ladder runs
+/// from the carried full-precision predictor instead, matching a stream
+/// decoder ([`crate::ima_qt::decode_block_continuous`]).
 pub fn ima_qt_encode_block_reference(
     samples: &[i16],
     channels: usize,
@@ -1395,8 +1459,10 @@ pub fn ima_qt_encode_block_reference(
     for (ch, st) in states.iter_mut().enumerate() {
         let block_off = ch * QT_BLOCK_BYTES_PER_CHANNEL;
         let predictor_seed = (samples[ch] as i32) & !0x7F;
-        st.predictor = predictor_seed;
         st.step_index = st.step_index.clamp(0, 88);
+        // A preamble that agrees with the carried state makes a stream
+        // decoder keep its full-precision predictor; quantize from it.
+        st.predictor = qt_block_start_predictor(st, predictor_seed, st.step_index);
 
         let preamble: u16 = (predictor_seed as u16 & 0xFF80) | (st.step_index as u16 & 0x7F);
         out[block_off] = (preamble >> 8) as u8;
@@ -1421,8 +1487,9 @@ pub struct ImaQtEncoder {
     output_params: CodecParameters,
     channels: usize,
     quantizer: Quantizer,
-    /// Per-channel codec state for [`Quantizer::Reference`] — the step
-    /// index carries across blocks; unused under [`Quantizer::Search`].
+    /// Per-channel decoder state carried across blocks (both
+    /// quantizers): the step index and, while a block's preamble agrees
+    /// with it, the full-precision predictor.
     ref_states: Vec<ima_wav::ImaCodecState>,
     pcm: Vec<i16>,
     pending: VecDeque<Packet>,
@@ -1439,7 +1506,9 @@ impl ImaQtEncoder {
     }
     fn encode_one_block(&mut self, samples: &[i16]) -> Result<Vec<u8>> {
         match self.quantizer {
-            Quantizer::Search => ima_qt_encode_block(samples, self.channels),
+            Quantizer::Search => {
+                ima_qt_encode_block_continuous(samples, self.channels, &mut self.ref_states)
+            }
             Quantizer::Reference => {
                 ima_qt_encode_block_reference(samples, self.channels, &mut self.ref_states)
             }
@@ -1558,7 +1627,7 @@ impl Encoder for DialogicEncoder {
             _ => {
                 return Err(Error::invalid(
                     "adpcm_dialogic encoder: expected audio frame",
-                ))
+                ));
             }
         };
         // Re-use the shared PCM unpacker for `channels` interleaved lanes.
@@ -1693,7 +1762,7 @@ impl Encoder for YamahaAEncoder {
             _ => {
                 return Err(Error::invalid(
                     "adpcm_yamaha_a encoder: expected audio frame",
-                ))
+                ));
             }
         };
         let mut pcm: Vec<i16> = Vec::new();
@@ -1870,20 +1939,20 @@ fn push_audio_frame_pcm(pcm: &mut Vec<i16>, af: &AudioFrame, channels: usize) ->
         return Ok(());
     }
     let bytes = &af.data[0];
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return Err(Error::invalid(format!(
             "adpcm encoder: PCM byte count {} not multiple of 2 (i16)",
             bytes.len()
         )));
     }
     let total_samples = bytes.len() / 2;
-    if total_samples % channels != 0 {
+    if !total_samples.is_multiple_of(channels) {
         return Err(Error::invalid(format!(
             "adpcm encoder: PCM sample count {total_samples} not multiple of {channels} channels"
         )));
     }
     pcm.reserve(total_samples);
-    for c in bytes.chunks_exact(2) {
+    for c in bytes.as_chunks::<2>().0 {
         pcm.push(i16::from_le_bytes([c[0], c[1]]));
     }
     Ok(())
@@ -2119,11 +2188,7 @@ pub(crate) fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>>
             let mut output_params = params.clone();
             if output_params.tag.is_none() {
                 output_params.tag = Some(CodecTag::wave_format(if wav_framing {
-                    if rate.bits() == 4 {
-                        0x0040
-                    } else {
-                        0x0014
-                    }
+                    if rate.bits() == 4 { 0x0040 } else { 0x0014 }
                 } else {
                     0x0045
                 }));
@@ -2281,7 +2346,7 @@ mod tests {
     fn ms_stereo_round_trip_sine_low_error() {
         // 0.1s of 440Hz on L, 660Hz on R.
         let samples_per_block = 2 + (256 - 14) / 2 * 2; // body 242B * 2 / 2 = 242 → 2 + 242 = 244
-                                                        // Actually: stereo body_len=242 bytes → samples_after_prelude_per_channel = 242*2/2 = 242 → total 244.
+        // Actually: stereo body_len=242 bytes → samples_after_prelude_per_channel = 242*2/2 = 242 → total 244.
         let n = samples_per_block * 4;
         let mut pcm = Vec::with_capacity(n * 2);
         let l = sine_pcm(n, 440.0, 22050.0, 8000.0);
@@ -2429,7 +2494,9 @@ mod tests {
             panic!("expected audio frame")
         };
         let pcm: Vec<i16> = out.data[0]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| i16::from_le_bytes([c[0], c[1]]))
             .collect();
         assert_eq!(pcm.len(), interleaved.len());

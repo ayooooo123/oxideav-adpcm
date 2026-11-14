@@ -7,7 +7,9 @@
 
 use crate::{dialogic, ffmpeg_adpcm, ffmpeg_g726, g726, ima_qt, ima_wav, ms, yamaha, yamaha_a};
 use oxideav_core::Decoder;
-use oxideav_core::{AudioFormat, AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, Result, SampleFormat};
+use oxideav_core::{
+    AudioFormat, AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, Result, SampleFormat,
+};
 
 /// Which of the supported variants this instance implements.
 ///
@@ -54,6 +56,7 @@ use oxideav_core::{AudioFormat, AudioFrame, CodecId, CodecParameters, Error, Fra
 /// - [`Variant::all`] — slice of every supported variant, suitable for
 ///   `for v in Variant::all() { … }` iteration.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Variant {
     Ms,
     ImaWav,
@@ -453,7 +456,7 @@ impl Variant {
                 // Body must be a whole number of per-channel bytes;
                 // otherwise the per-channel nibble-pair count isn't an
                 // integer.
-                if body_len % ch != 0 {
+                if !body_len.is_multiple_of(ch) {
                     return None;
                 }
                 Some(2 + (body_len * 2) / ch)
@@ -465,7 +468,7 @@ impl Variant {
                 }
                 let body_len = block_bytes - header_len;
                 let group_bytes = 4 * ch;
-                if body_len % group_bytes != 0 {
+                if !body_len.is_multiple_of(group_bytes) {
                     return None;
                 }
                 Some(1 + (body_len / group_bytes) * 8)
@@ -542,7 +545,7 @@ impl Variant {
                 // Body decodes 2 samples per byte per channel; the total
                 // body byte run must be a whole number of bytes.
                 let body_nibbles = body_samples * ch;
-                if body_nibbles % 2 != 0 {
+                if !body_nibbles.is_multiple_of(2) {
                     return None;
                 }
                 Some(7 * ch + body_nibbles / 2)
@@ -554,7 +557,7 @@ impl Variant {
                 }
                 let body_samples = samples_per_channel - 1;
                 // 8 samples per channel per 4*ch-byte group.
-                if body_samples % 8 != 0 {
+                if !body_samples.is_multiple_of(8) {
                     return None;
                 }
                 let groups = body_samples / 8;
@@ -994,9 +997,15 @@ pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>>
     // The container's bits per coded sample (FFmpeg's `bits_per_coded_sample`,
     // WAV `wBitsPerSample`): G.726's code width and IMA-WAV's bit depth,
     // where they make sense; the `bits_per_sample` option below wins.
-    if let Some(bits) = params.options.get("bits_per_coded_sample").and_then(|v| v.parse::<u8>().ok()) {
+    if let Some(bits) = params
+        .options
+        .get("bits_per_coded_sample")
+        .and_then(|v| v.parse::<u8>().ok())
+    {
         match (variant, bits) {
-            (Variant::G726, 2..=5) => g726_rate = g726::Rate::from_bits(bits).expect("2..=5 maps to a rate"),
+            (Variant::G726, 2..=5) => {
+                g726_rate = g726::Rate::from_bits(bits).expect("2..=5 maps to a rate")
+            }
             (Variant::ImaWav, 3 | 4) => ima_bits = bits,
             _ => {}
         }
@@ -1102,7 +1111,7 @@ pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>>
                 Variant::ImaWav if ima_bits == 3 => {
                     // 3-bit framing: header seeds 1 sample, each
                     // 12-byte-per-channel group adds 32.
-                    if spb < 1 || (spb - 1) % ima_wav::GROUP_SAMPLES_3BIT != 0 {
+                    if spb < 1 || !(spb - 1).is_multiple_of(ima_wav::GROUP_SAMPLES_3BIT) {
                         return Err(Error::invalid(format!(
                             "adpcm_ima_wav(3-bit): wSamplesPerBlock {spb} is not 1 + 32k"
                         )));
@@ -1168,10 +1177,11 @@ pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>>
     // the `fmt ` extension through `extradata` instead — the
     // catalogue's one-field `nAuxBlockSize` form. An explicit option
     // wins over extradata.
-    if g726_framing == G726Framing::Wav && params.options.get("aux_block_size").is_none() {
-        if let Some(aux) = g726::wav_parse_format_extra(&params.extradata) {
-            g726_aux = aux as usize;
-        }
+    if g726_framing == G726Framing::Wav
+        && params.options.get("aux_block_size").is_none()
+        && let Some(aux) = g726::wav_parse_format_extra(&params.extradata)
+    {
+        g726_aux = aux as usize;
     }
     if g726_framing == G726Framing::Wav {
         if !g726::wav_rate_supported(g726_rate) {
@@ -1209,7 +1219,9 @@ pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>>
         qt_state: vec![ffmpeg_adpcm::QtChannel::default(); channels as usize],
         g726_rate,
         g726_states: vec![g726::State::new(g726_rate); g726_lanes],
-        g726_ffmpeg: (0..g726_lanes).map(|_| ffmpeg_g726::Decoder::new(g726_rate)).collect(),
+        g726_ffmpeg: (0..g726_lanes)
+            .map(|_| ffmpeg_g726::Decoder::new(g726_rate))
+            .collect(),
         g726_unpacker: g726::BitUnpacker::new(g726_order),
         g726_order,
         g726_law,
@@ -1387,7 +1399,7 @@ impl AdpcmDecoder {
             Variant::ImaQt => {
                 // Packet may contain N·(channels·34) bytes — iterate.
                 let blk = ima_qt::QT_BLOCK_SIZE * channels;
-                if pkt.data.len() % blk != 0 {
+                if !pkt.data.len().is_multiple_of(blk) {
                     return Err(Error::invalid(format!(
                         "adpcm_ima_qt: packet {} bytes is not a multiple of {blk} ({channels}ch × 34B)",
                         pkt.data.len()
@@ -1409,9 +1421,11 @@ impl AdpcmDecoder {
                 yamaha_a::Output::Wide16,
             ),
             // FFmpeg's `adpcm_ima_oki` rounding (`ffmpeg_adpcm`).
-            Variant::Dialogic => {
-                ffmpeg_adpcm::decode_oki_packet(&pkt.data, &mut self.dialogic_state, self.dialogic_order)
-            }
+            Variant::Dialogic => ffmpeg_adpcm::decode_oki_packet(
+                &pkt.data,
+                &mut self.dialogic_state,
+                self.dialogic_order,
+            ),
             Variant::G726 => {
                 // Under the WAV sub-block framing, strip the per-block
                 // auxiliary prefix first (position persists across
@@ -1490,7 +1504,11 @@ impl Decoder for AdpcmDecoder {
     /// Interleaved 16-bit samples for every variant, whatever the container
     /// declares.
     fn output_audio_format(&self) -> Option<AudioFormat> {
-        Some(AudioFormat { sample_format: SampleFormat::S16, sample_rate: self.sample_rate?, channels: self.channels })
+        Some(AudioFormat {
+            sample_format: SampleFormat::S16,
+            sample_rate: self.sample_rate?,
+            channels: self.channels,
+        })
     }
 
     fn send_packet(&mut self, packet: &Packet) -> Result<()> {
@@ -1525,8 +1543,8 @@ impl Decoder for AdpcmDecoder {
     fn reset(&mut self) -> Result<()> {
         self.pending = None;
         self.eof = false;
-        // Re-seed per-channel Yamaha (A + B) + Dialogic state. MS /
-        // IMA are memoryless per block so no further action needed.
+        // Re-seed per-channel Yamaha (A + B), Dialogic and QuickTime IMA state. MS /
+        // IMA-WAV are memoryless per block so no further action needed.
         for st in &mut self.yamaha_state {
             *st = yamaha::Channel::for_chip(self.yamaha_chip);
         }

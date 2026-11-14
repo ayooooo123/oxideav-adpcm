@@ -27,7 +27,8 @@
 //!   other description.
 
 use oxideav_core::{
-    AudioFormat, AudioFrame, CodecId, CodecParameters, Decoder, Error, Frame, Packet, Result, SampleFormat,
+    AudioFormat, AudioFrame, CodecId, CodecParameters, Decoder, Error, Frame, Packet, Result,
+    SampleFormat,
 };
 
 use crate::dialogic;
@@ -76,11 +77,16 @@ pub fn decode_qt_block(data: &[u8], state: &mut [QtChannel]) -> Result<Vec<i16>>
             cs.predictor = predictor;
         }
         if !(0..=88).contains(&cs.step_index) {
-            return Err(Error::invalid(format!("adpcm_ima_qt: step index {} on channel {ch}", cs.step_index)));
+            return Err(Error::invalid(format!(
+                "adpcm_ima_qt: step index {} on channel {ch}",
+                cs.step_index
+            )));
         }
         for (i, &byte) in block[2..].iter().enumerate() {
-            out[2 * i * channels + ch] = ima_expand_nibble(&mut cs.predictor, &mut cs.step_index, byte & 0x0F);
-            out[(2 * i + 1) * channels + ch] = ima_expand_nibble(&mut cs.predictor, &mut cs.step_index, byte >> 4);
+            out[2 * i * channels + ch] =
+                ima_expand_nibble(&mut cs.predictor, &mut cs.step_index, byte & 0x0F);
+            out[(2 * i + 1) * channels + ch] =
+                ima_expand_nibble(&mut cs.predictor, &mut cs.step_index, byte >> 4);
         }
     }
     Ok(out)
@@ -93,7 +99,11 @@ fn oki_expand_nibble(c: &mut dialogic::Channel, nibble: u8) -> i16 {
     let step = i32::from(OKI_STEP_SIZE[c.step_index.clamp(0, 48) as usize]);
     let delta = i32::from(nibble & 7);
     let diff = ((2 * delta + 1) * step) >> 3;
-    let predictor = if nibble & 8 != 0 { c.predictor - diff } else { c.predictor + diff };
+    let predictor = if nibble & 8 != 0 {
+        c.predictor - diff
+    } else {
+        c.predictor + diff
+    };
     c.predictor = predictor.clamp(-2048, 2047);
     c.step_index = (c.step_index + OKI_INDEX_ADJUST[usize::from(nibble & 7)]).clamp(0, 48);
     (c.predictor * 16) as i16
@@ -101,7 +111,11 @@ fn oki_expand_nibble(c: &mut dialogic::Channel, nibble: u8) -> i16 {
 
 /// Decodes an OKI packet as FFmpeg's `adpcm_ima_oki`: two nibbles a byte,
 /// in `order`, alternating over the channels.
-pub fn decode_oki_packet(packet: &[u8], state: &mut [dialogic::Channel], order: dialogic::NibbleOrder) -> Vec<i16> {
+pub fn decode_oki_packet(
+    packet: &[u8],
+    state: &mut [dialogic::Channel],
+    order: dialogic::NibbleOrder,
+) -> Vec<i16> {
     let channels = state.len();
     let mut out = Vec::with_capacity(packet.len() * 2);
     if channels == 0 {
@@ -124,7 +138,9 @@ pub fn decode_oki_packet(packet: &[u8], state: &mut [dialogic::Channel], order: 
 // ───────────────────────── Creative / Sound Blaster ─────────────────────────
 
 /// FFmpeg's ADPCM table of step multipliers (`ff_adpcm_AdaptationTable`).
-const ADAPTATION: [i32; 16] = [230, 230, 230, 230, 307, 409, 512, 614, 768, 614, 512, 409, 307, 230, 230, 230];
+const ADAPTATION: [i32; 16] = [
+    230, 230, 230, 230, 307, 409, 512, 614, 768, 614, 512, 409, 307, 230, 230, 230,
+];
 
 /// The Creative and Sound Blaster codecs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -191,11 +207,18 @@ pub fn make_creative_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder
         CODEC_ID_SBPRO_2 => Kind::Sbpro2,
         CODEC_ID_SBPRO_3 => Kind::Sbpro3,
         CODEC_ID_SBPRO_4 => Kind::Sbpro4,
-        other => return Err(Error::unsupported(format!("adpcm: {other} is not a Creative codec"))),
+        other => {
+            return Err(Error::unsupported(format!(
+                "adpcm: {other} is not a Creative codec"
+            )));
+        }
     };
     let channels = usize::from(params.channels.unwrap_or(1));
     if !(1..=2).contains(&channels) {
-        return Err(Error::unsupported(format!("{}: {channels} channels (1 or 2)", params.codec_id.as_str())));
+        return Err(Error::unsupported(format!(
+            "{}: {channels} channels (1 or 2)",
+            params.codec_id.as_str()
+        )));
     }
     let mut decoder = CreativeDecoder {
         codec_id: params.codec_id.clone(),
@@ -299,16 +322,25 @@ impl Decoder for CreativeDecoder {
     /// Interleaved 16-bit samples, whatever the container declares (a VOC
     /// file says 8 bits for its 8-bit-coded ADPCM).
     fn output_audio_format(&self) -> Option<AudioFormat> {
-        Some(AudioFormat { sample_format: SampleFormat::S16, sample_rate: self.sample_rate?, channels: self.channels as u16 })
+        Some(AudioFormat {
+            sample_format: SampleFormat::S16,
+            sample_rate: self.sample_rate?,
+            channels: self.channels as u16,
+        })
     }
 
     fn send_packet(&mut self, packet: &Packet) -> Result<()> {
         if self.pending.is_some() {
-            return Err(Error::other("adpcm decoder: call receive_frame before sending another packet"));
+            return Err(Error::other(
+                "adpcm decoder: call receive_frame before sending another packet",
+            ));
         }
-        let (samples, pcm) = self
-            .decode(&packet.data)
-            .ok_or_else(|| Error::invalid(format!("{}: packet shorter than its raw first sample", self.codec_id.as_str())))?;
+        let (samples, pcm) = self.decode(&packet.data).ok_or_else(|| {
+            Error::invalid(format!(
+                "{}: packet shorter than its raw first sample",
+                self.codec_id.as_str()
+            ))
+        })?;
         let data = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
         self.pending = Some((packet.pts, samples as u32, data));
         Ok(())
@@ -316,7 +348,11 @@ impl Decoder for CreativeDecoder {
 
     fn receive_frame(&mut self) -> Result<Frame> {
         match self.pending.take() {
-            Some((pts, samples, data)) => Ok(Frame::Audio(AudioFrame { samples, pts, data: vec![data] })),
+            Some((pts, samples, data)) => Ok(Frame::Audio(AudioFrame {
+                samples,
+                pts,
+                data: vec![data],
+            })),
             None if self.eof => Err(Error::Eof),
             None => Err(Error::NeedMore),
         }
